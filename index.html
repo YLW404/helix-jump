@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Helix Jump 极简演示</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; overflow: hidden; background: #dcdde1; touch-action: none; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        #ui { position: absolute; top: 30px; left: 0; width: 100%; text-align: center; pointer-events: none; }
+        #score { font-size: 56px; font-weight: 900; color: #2f3640; text-shadow: 2px 2px 0px #fff; }
+        #tip { font-size: 16px; color: #718093; margin-top: 5px; font-weight: bold; }
+        #gameover { position: absolute; top: 40%; left: 0; width: 100%; text-align: center; display: none; }
+        #gameover h1 { font-size: 38px; color: #e84118; margin: 0; }
+        #gameover p { font-size: 18px; color: #2f3640; cursor: pointer; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div id="ui">
+        <div id="score">0</div>
+        <div id="tip">按住并左右滑动旋转圆柱</div>
+    </div>
+    <div id="gameover">
+        <h1>游戏结束!</h1>
+        <p>点击屏幕重新开始</p>
+    </div>
+
+    <script>
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0xdcdde1, 0.035);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0xdcdde1);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+        dirLight.position.set(5, 15, 10);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // 场景规格与参数
+        const PILLAR_RADIUS = 1.2;
+        const DISK_RADIUS = 3.0;
+        const LEVEL_HEIGHT = 2.5;
+        const TOTAL_LEVELS = 35;
+        const SECTORS_PER_RING = 12;
+
+        let pillarGroup = new THREE.Group();
+        scene.add(pillarGroup);
+
+        // 中心白色立柱
+        const pillarGeo = new THREE.CylinderGeometry(PILLAR_RADIUS, PILLAR_RADIUS, TOTAL_LEVELS * LEVEL_HEIGHT + 10, 32);
+        const pillarMat = new THREE.MeshStandardMaterial({ color: 0xf5f6fa, roughness: 0.3 });
+        const pillarMesh = new THREE.Mesh(pillarGeo, pillarMat);
+        pillarMesh.position.y = -(TOTAL_LEVELS * LEVEL_HEIGHT) / 2 + 2;
+        pillarGroup.add(pillarMesh);
+
+        const safeMat = new THREE.MeshStandardMaterial({ color: 0x2f3640, roughness: 0.5 });
+        const deadMat = new THREE.MeshStandardMaterial({ color: 0xe84118, roughness: 0.4 });
+
+        // 生成各层圆盘
+        let rings = [];
+        for (let i = 0; i < TOTAL_LEVELS; i++) {
+            let ringY = -i * LEVEL_HEIGHT;
+            let ringObj = { y: ringY, sectors: [], passed: false };
+
+            // 随机设定缺口扇区
+            let holeIndex = Math.floor(Math.random() * SECTORS_PER_RING);
+            let deadIndex = (holeIndex + Math.floor(Math.random() * 4) + 4) % SECTORS_PER_RING;
+
+            for (let s = 0; s < SECTORS_PER_RING; s++) {
+                if (s === holeIndex) continue; // 缺口处不生成任何网格与碰撞数据
+
+                let isDead = (i > 0 && s === deadIndex);
+                let anglePerSector = (Math.PI * 2) / SECTORS_PER_RING;
+                let startAngle = s * anglePerSector;
+
+                let sectorGeo = new THREE.CylinderGeometry(DISK_RADIUS, DISK_RADIUS, 0.25, 8, 1, false, startAngle, anglePerSector * 0.98);
+                let mesh = new THREE.Mesh(sectorGeo, isDead ? deadMat : safeMat);
+                mesh.position.y = ringY;
+                mesh.receiveShadow = true;
+                pillarGroup.add(mesh);
+
+                ringObj.sectors.push({
+                    mesh: mesh,
+                    isDead: isDead,
+                    startAngle: startAngle,
+                    endAngle: startAngle + anglePerSector
+                });
+            }
+            rings.push(ringObj);
+        }
+
+        // 小球设置
+        const ballRadius = 0.35;
+        const ballGeo = new THREE.SphereGeometry(ballRadius, 24, 24);
+        const ballMat = new THREE.MeshStandardMaterial({ color: 0xfbc531, roughness: 0.2 });
+        const ball = new THREE.Mesh(ballGeo, ballMat);
+        ball.castShadow = true;
+        const BALL_Z = 2.1; // 小球锁死在 +Z 轴正前方
+        ball.position.set(0, 1.5, BALL_Z);
+        scene.add(ball);
+
+        // 物理动力学变量
+        let ballY = 1.5;
+        let ballVY = 0;
+        const GRAVITY = -26;
+        const BOUNCE_FORCE = 8.5;
+        let comboCount = 0;
+        let score = 0;
+        let isDead = false;
+        let camTargetY = 3.5;
+
+        // 手指/鼠标水平滑动控制
+        let isDragging = false;
+        let prevMouseX = 0;
+
+        window.addEventListener('pointerdown', (e) => {
+            if (isDead) { location.reload(); return; }
+            isDragging = true;
+            prevMouseX = e.clientX;
+        });
+        window.addEventListener('pointermove', (e) => {
+            if (!isDragging || isDead) return;
+            let deltaX = e.clientX - prevMouseX;
+            pillarGroup.rotation.y += deltaX * 0.008;
+            prevMouseX = e.clientX;
+        });
+        window.addEventListener('pointerup', () => isDragging = false);
+
+        // 连击粉碎特效管理
+        let shatteringParts = [];
+        function shatterRing(ring) {
+            for (let sec of ring.sectors) {
+                pillarGroup.remove(sec.mesh);
+                scene.add(sec.mesh);
+                sec.mesh.position.y = ring.y;
+                sec.mesh.rotation.y = pillarGroup.rotation.y;
+                shatteringParts.push({
+                    mesh: sec.mesh,
+                    vx: (Math.random() - 0.5) * 8,
+                    vy: Math.random() * 3 + 1,
+                    vz: (Math.random() - 0.5) * 8,
+                    rotX: Math.random() * 6,
+                    rotY: Math.random() * 6
+                });
+            }
+            ring.sectors = [];
+        }
+
+        let clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            let dt = clock.getDelta();
+            if (dt > 0.05) dt = 0.05;
+
+            // 碎块散开物理处理
+            for (let i = shatteringParts.length - 1; i >= 0; i--) {
+                let p = shatteringParts[i];
+                p.mesh.position.x += p.vx * dt;
+                p.mesh.position.y += p.vy * dt;
+                p.mesh.position.z += p.vz * dt;
+                p.vy += GRAVITY * dt;
+                p.mesh.rotation.x += p.rotX * dt;
+                p.mesh.rotation.y += p.rotY * dt;
+                if (p.mesh.position.y < ballY - 10) {
+                    scene.remove(p.mesh);
+                    shatteringParts.splice(i, 1);
+                }
+            }
+
+            if (!isDead) {
+                let prevY = ballY;
+                ballVY += GRAVITY * dt;
+                ballY += ballVY * dt;
+
+                // 核心碰撞与下落逻辑
+                for (let ring of rings) {
+                    let diskSurfaceY = ring.y + 0.125;
+
+                    // 计算小球在柱体当前坐标系下的真实局部角度（彻底消除 90 度错位）
+                    let relAngle = (-pillarGroup.rotation.y) % (Math.PI * 2);
+                    if (relAngle < 0) relAngle += Math.PI * 2;
+
+                    // 检索小球正下方对应的扇片（缺口处此处为 undefined）
+                    let hitSector = ring.sectors.find(s => relAngle >= s.startAngle && relAngle < s.endAngle);
+
+                    // 1. 穿过层级：进入缺口且高度跨过该层平面
+                    if (prevY >= diskSurfaceY && ballY < diskSurfaceY && !hitSector && !ring.passed) {
+                        ring.passed = true;
+                        comboCount++;
+                        score += comboCount;
+                        document.getElementById('score').innerText = score;
+                    }
+
+                    // 2. 接触地面：下落状态中碰触到实体扇片
+                    if (ballVY < 0 && (prevY - ballRadius) >= (diskSurfaceY - 0.25) && (ballY - ballRadius) <= diskSurfaceY) {
+                        if (hitSector) {
+                            if (comboCount >= 3) {
+                                // 蓄力砸碎
+                                shatterRing(ring);
+                                ring.passed = true;
+                                ballVY = BOUNCE_FORCE;
+                                comboCount = 0;
+                            } else if (hitSector.isDead) {
+                                // 踩中危险区死亡
+                                isDead = true;
+                                document.getElementById('gameover').style.display = 'block';
+                            } else {
+                                // 正常反弹
+                                ballY = diskSurfaceY + ballRadius;
+                                ballVY = BOUNCE_FORCE;
+                                comboCount = 0;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                ball.position.y = ballY;
+
+                // 相机单向向下平滑跟随
+                if (ballY + 3.0 < camTargetY) {
+                    camTargetY = ballY + 3.0;
+                }
+                camera.position.y += (camTargetY - camera.position.y) * 0.1;
+                camera.position.z = 8.5;
+                camera.position.x = 0;
+                camera.lookAt(0, camera.position.y - 1.2, 0);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
