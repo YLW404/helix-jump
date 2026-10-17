@@ -19,7 +19,7 @@
 <body>
     <div id="ui">
         <div id="score">0</div>
-        <div id="tip">按住并左右滑动旋转圆柱</div>
+        <div id="tip">左右滑动旋转立柱</div>
     </div>
     <div id="gameover">
         <h1>游戏结束!</h1>
@@ -28,27 +28,28 @@
 
     <script>
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0xdcdde1, 0.035);
+        // 降低迷雾浓度，使下方 2~3 层依然清晰可见
+        scene.fog = new THREE.FogExp2(0xdcdde1, 0.018);
 
-        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setClearColor(0xdcdde1);
         renderer.shadowMap.enabled = true;
         document.body.appendChild(renderer.domElement);
 
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
         scene.add(ambientLight);
-        const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-        dirLight.position.set(5, 15, 10);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.65);
+        dirLight.position.set(5, 20, 10);
         dirLight.castShadow = true;
         scene.add(dirLight);
 
         // 场景规格与参数
         const PILLAR_RADIUS = 1.2;
         const DISK_RADIUS = 3.0;
-        const LEVEL_HEIGHT = 2.5;
-        const TOTAL_LEVELS = 35;
+        const LEVEL_HEIGHT = 2.8; // 稍微拉开层高，预留更通透的透视视窗
+        const TOTAL_LEVELS = 40;
         const SECTORS_PER_RING = 12;
 
         let pillarGroup = new THREE.Group();
@@ -70,18 +71,18 @@
             let ringY = -i * LEVEL_HEIGHT;
             let ringObj = { y: ringY, sectors: [], passed: false };
 
-            // 随机设定缺口扇区
+            // 缺口与危险区位置随机分配
             let holeIndex = Math.floor(Math.random() * SECTORS_PER_RING);
             let deadIndex = (holeIndex + Math.floor(Math.random() * 4) + 4) % SECTORS_PER_RING;
 
             for (let s = 0; s < SECTORS_PER_RING; s++) {
-                if (s === holeIndex) continue; // 缺口处不生成任何网格与碰撞数据
+                if (s === holeIndex) continue; // 缺口无网格
 
                 let isDead = (i > 0 && s === deadIndex);
                 let anglePerSector = (Math.PI * 2) / SECTORS_PER_RING;
                 let startAngle = s * anglePerSector;
 
-                let sectorGeo = new THREE.CylinderGeometry(DISK_RADIUS, DISK_RADIUS, 0.25, 8, 1, false, startAngle, anglePerSector * 0.98);
+                let sectorGeo = new THREE.CylinderGeometry(DISK_RADIUS, DISK_RADIUS, 0.22, 8, 1, false, startAngle, anglePerSector * 0.98);
                 let mesh = new THREE.Mesh(sectorGeo, isDead ? deadMat : safeMat);
                 mesh.position.y = ringY;
                 mesh.receiveShadow = true;
@@ -103,7 +104,7 @@
         const ballMat = new THREE.MeshStandardMaterial({ color: 0xfbc531, roughness: 0.2 });
         const ball = new THREE.Mesh(ballGeo, ballMat);
         ball.castShadow = true;
-        const BALL_Z = 2.1; // 小球锁死在 +Z 轴正前方
+        const BALL_Z = 2.1;
         ball.position.set(0, 1.5, BALL_Z);
         scene.add(ball);
 
@@ -115,7 +116,10 @@
         let comboCount = 0;
         let score = 0;
         let isDead = false;
-        let camTargetY = 3.5;
+
+        // 视口与相机配置：初始设定居高俯视仰角
+        let camHeightOffset = 5.2; // 相机高出小球的距离
+        let camTargetY = ballY + camHeightOffset;
 
         // 手指/鼠标水平滑动控制
         let isDragging = false;
@@ -134,7 +138,7 @@
         });
         window.addEventListener('pointerup', () => isDragging = false);
 
-        // 连击粉碎特效管理
+        // 连击粉碎特效
         let shatteringParts = [];
         function shatterRing(ring) {
             for (let sec of ring.sectors) {
@@ -183,16 +187,15 @@
 
                 // 核心碰撞与下落逻辑
                 for (let ring of rings) {
-                    let diskSurfaceY = ring.y + 0.125;
+                    let diskSurfaceY = ring.y + 0.11;
 
-                    // 计算小球在柱体当前坐标系下的真实局部角度（彻底消除 90 度错位）
+                    // 计算相对角度
                     let relAngle = (-pillarGroup.rotation.y) % (Math.PI * 2);
                     if (relAngle < 0) relAngle += Math.PI * 2;
 
-                    // 检索小球正下方对应的扇片（缺口处此处为 undefined）
                     let hitSector = ring.sectors.find(s => relAngle >= s.startAngle && relAngle < s.endAngle);
 
-                    // 1. 穿过层级：进入缺口且高度跨过该层平面
+                    // 穿过层级检测
                     if (prevY >= diskSurfaceY && ballY < diskSurfaceY && !hitSector && !ring.passed) {
                         ring.passed = true;
                         comboCount++;
@@ -200,21 +203,18 @@
                         document.getElementById('score').innerText = score;
                     }
 
-                    // 2. 接触地面：下落状态中碰触到实体扇片
+                    // 接触地面反弹检测
                     if (ballVY < 0 && (prevY - ballRadius) >= (diskSurfaceY - 0.25) && (ballY - ballRadius) <= diskSurfaceY) {
                         if (hitSector) {
                             if (comboCount >= 3) {
-                                // 蓄力砸碎
                                 shatterRing(ring);
                                 ring.passed = true;
                                 ballVY = BOUNCE_FORCE;
                                 comboCount = 0;
                             } else if (hitSector.isDead) {
-                                // 踩中危险区死亡
                                 isDead = true;
                                 document.getElementById('gameover').style.display = 'block';
                             } else {
-                                // 正常反弹
                                 ballY = diskSurfaceY + ballRadius;
                                 ballVY = BOUNCE_FORCE;
                                 comboCount = 0;
@@ -226,14 +226,20 @@
 
                 ball.position.y = ballY;
 
-                // 相机单向向下平滑跟随
-                if (ballY + 3.0 < camTargetY) {
-                    camTargetY = ballY + 3.0;
+                // 核心改动：俯角摄像机追踪逻辑
+                // 相机跟随平滑向下，保持在小球上方偏高位置俯拍
+                if (ballY + camHeightOffset < camTargetY) {
+                    camTargetY = ballY + camHeightOffset;
                 }
-                camera.position.y += (camTargetY - camera.position.y) * 0.1;
-                camera.position.z = 8.5;
+                camera.position.y += (camTargetY - camera.position.y) * 0.12;
+
+                // 针对手机竖屏（宽比高小）动态适配镜头距离
+                const isPortrait = window.innerWidth < window.innerHeight;
+                camera.position.z = isPortrait ? 9.8 : 7.8;
                 camera.position.x = 0;
-                camera.lookAt(0, camera.position.y - 1.2, 0);
+
+                // 视线朝向小球下方的深处点，形成约 30°~35° 俯视视线
+                camera.lookAt(0, camera.position.y - 4.6, 0.4);
             }
 
             renderer.render(scene, camera);
@@ -249,3 +255,4 @@
     </script>
 </body>
 </html>
+
